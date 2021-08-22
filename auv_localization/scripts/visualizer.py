@@ -1,8 +1,12 @@
 #!/usr/bin/env python
 
 import rospy
+import tf2_ros
+import tf2_geometry_msgs
 from visualization_msgs.msg import MarkerArray
 from std_msgs.msg import Float64MultiArray
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import PoseWithCovarianceStamped
 from matplotlib import animation
 from matplotlib import pyplot as plt
 import numpy as np
@@ -20,16 +24,25 @@ class Vizualizer:
                      'x': 10,
                      'y': 10
                  }):
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+
+        self.target_frame = 'utm'
         self.robot_name = self._get_robot_name()
         self.boundary = boundary
         self.map_objects = self._init_map_objects()
         self.env_lims = self._set_envlims(ax_lims)
-        self.fig, self.ax = self.init_plot()
-        plt.show()
 
-        self.particles = None
-        self.particle_color = 'g'
-        self._setup_particle_subscriber()
+        self.fig, self.ax = plt.subplots()
+        self.init_plot()
+
+        #self.particles_topic = '/{}/localization/particles'.format(
+        #    self.robot_name)
+        #self.particles = None
+        #self.particle_color = 'b'
+        #self._setup_particle_subscriber()
+
+        self.groundtruth_pose = None
 
     def _get_robot_name(self):
         """Get robot name if exist, else use default = sam"""
@@ -37,9 +50,40 @@ class Vizualizer:
             return rospy.get_param('~robot_name')
         return 'sam'
 
+    def update_groundtruth_pose(self, msg):
+        pose = msg.pose
+        try:
+            trans = self.tf_buffer.lookup_transform(self.target_frame,
+                                                    msg.header.frame_id,
+                                                    rospy.Time())
+            self.groundtruth_pose = tf2_geometry_msgs.do_transform_pose(
+                pose, trans)
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                tf2_ros.ExtrapolationException) as error:
+            print('Failed to transform. Error: {}'.format(error))
+
+    def init_groundtruth_pose_plot(self):
+        self.groundtruth_line, = self.ax.plot([], [],
+                                              label='groundtruth_pose',
+                                              c='g',
+                                              marker='o',
+                                              ls='')
+        return self.groundtruth_line
+
+    def animate_groundtruth_pose(self, i):
+        """
+        This method is periodically called by FuncAnimation to update the
+        environment plot with the new groundtruth pose.
+
+        Args:
+            - i: frame id
+        """
+        self.groundtruth_line.set_xdata(self.groundtruth_pose.pose.position.x)
+        self.groundtruth_line.set_ydata(self.groundtruth_pose.pose.position.y)
+        return self.groundtruth_line
+
     def _setup_particle_subscriber(self):
-        particles_topic = '/{}/localization/particles'.format(self.robot_name)
-        self.particle_sub = rospy.Subscriber(particles_topic,
+        self.particle_sub = rospy.Subscriber(self.particles_topic,
                                              Float64MultiArray,
                                              self._update_particles)
 
@@ -60,11 +104,13 @@ class Vizualizer:
                              c=self.particle_color,
                              marker='o',
                              ls='')
-        animation.FuncAnimation(self.fig,
-                                self._animate_particles,
-                                fargs=(line, ),
-                                interval=50,
-                                blit=True)
+
+
+#       animation.FuncAnimation(self.fig,
+#                               self._animate_particles,
+#                               fargs=(line, ),
+#                               interval=50,
+#                               blit=True)
 
     def _animate_particles(self, i, line):
         """
@@ -122,19 +168,11 @@ class Vizualizer:
         return env_lims
 
     def init_plot(self):
-        """Initialize a 2D plot containing all the static map_objects.
+        """Initialize a 2D plot containing all the static map_objects."""
+        self.ax.set_xlim(self.env_lims['x'])
+        self.ax.set_ylim(self.env_lims['y'])
 
-        Args:
-            - num_particles: number of particles in the particle filter to be plotted
-
-        Return: Figure handler and the line object to be updated
-        """
-        fig = plt.figure()
-        ax = fig.add_subplot(111)
-        ax.set_xlim(self.env_lims['x'])
-        ax.set_ylim(self.env_lims['y'])
-
-        self._static_env_plot(ax)
+        self._static_env_plot()
 
         plt.legend(bbox_to_anchor=(1.01, 1),
                    loc='upper left',
@@ -142,22 +180,21 @@ class Vizualizer:
         plt.title('Environment')
         plt.xlabel('x (m)')
         plt.ylabel('y (m)')
-        return fig, ax
 
-    def _static_env_plot(self, ax):
+    def _static_env_plot(self):
         """
-        Plot the map consisting of self.map_objects in 2D plot onto the given
-        Axes object.
+        Plot the map consisting of self.map_objects in 2D plot onto the
+        Visualizer's Axes object.
         """
 
         for obj_id, obj_val in self.map_objects.items():
             # Plot as continuous line or individual point depending on the info given
             if isinstance(obj_val['x'], float):
-                ax.scatter(obj_val['x'],
-                           obj_val['y'],
-                           c=obj_val['c'],
-                           s=obj_val['s'] * 10,
-                           label=obj_id)
+                self.ax.scatter(obj_val['x'],
+                                obj_val['y'],
+                                c=obj_val['c'],
+                                s=obj_val['s'] * 10,
+                                label=obj_id)
             elif isinstance(obj_val['x'], tuple):
                 x = np.linspace(max(obj_val['x'][0], self.env_lims['x'][0]),
                                 min(obj_val['x'][1], self.env_lims['x'][1]),
@@ -165,11 +202,11 @@ class Vizualizer:
                 y = np.linspace(max(obj_val['y'][0], self.env_lims['y'][0]),
                                 min(obj_val['y'][1], self.env_lims['y'][1]),
                                 num=100)
-                ax.plot(x,
-                        y,
-                        c=obj_val['c'],
-                        linewidth=obj_val['s'],
-                        label=obj_id)
+                self.ax.plot(x,
+                             y,
+                             c=obj_val['c'],
+                             linewidth=obj_val['s'],
+                             label=obj_id)
 
 
 def main():
@@ -178,8 +215,16 @@ def main():
 
     viz = Vizualizer()
 
-    while not rospy.is_shutdown():
-        rospy.spin()
+    groundtruth_topic = '/{}/sim/odom'.format(viz.robot_name)
+    groundtruth_pose_sub = rospy.Subscriber(groundtruth_topic, Odometry,
+                                            viz.update_groundtruth_pose)
+    # It's important to assign this the FuncAnimation to a variable
+    # Otherwise it will be ignored and not run
+    ani = animation.FuncAnimation(viz.fig,
+                                  viz.animate_groundtruth_pose,
+                                  interval=50,
+                                  init_func=viz.init_groundtruth_pose_plot)
+    plt.show(block=True)
 
 
 if __name__ == '__main__':
