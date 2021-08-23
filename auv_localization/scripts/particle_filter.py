@@ -1,18 +1,28 @@
 #!/usr/bin/env python
 
 import rospy
+import tf2_ros
+import tf2_geometry_msgs
+from tf.transformations import quaternion_from_euler, euler_from_quaternion
+from nav_msgs.msg import Odometry
 from std_msgs.msg import Float64MultiArray, MultiArrayLayout, MultiArrayDimension
 import numpy as np
 
 
 class ParticleFilter:
-    def __init__(self, num_particles, num_states):
+    def __init__(self, num_particles, num_states, process_noise):
         self.robot_name = self._get_robot_name()
         self.num_particles = num_particles
         self.num_states = num_states
-        self.particles = np.zeros((self.num_particles, self.num_states))
+        self.process_noise = process_noise
 
-        self.particles_msg = self._init_particle_msg()
+        self.target_frame = 'utm'
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
+        self.particles = self._init_particles_for_tracking()
+        self.weights = self._init_weights()
+
+        self.particles_msg = self._init_particles_msg()
         self.particles_topic = '/{}/localization/particles'.format(
             self.robot_name)
         self.particles_pub = rospy.Publisher(self.particles_topic,
@@ -25,7 +35,7 @@ class ParticleFilter:
             return rospy.get_param('~robot_name')
         return 'sam'
 
-    def _init_particle_msg(self):
+    def _init_particles_msg(self):
         dim0 = MultiArrayDimension(label='particle_index',
                                    size=self.num_particles,
                                    stride=self.num_particles * self.num_states)
@@ -37,13 +47,54 @@ class ParticleFilter:
                                          data=self.particles.flatten())
         return particle_msg
 
+    def _init_particles_for_tracking(self):
+
+        particles = np.zeros((self.num_particles, self.num_states))
+
+        # Get init pose in utm
+        odom_topic = '/{}/sim/odom'.format(self.robot_name)
+        msg = rospy.wait_for_message(odom_topic, Odometry)
+        print('odom msg: {}'.format(msg))
+        pose = msg.pose
+
+        trans = None
+        while trans is None:
+            try:
+                trans = self.tf_buffer.lookup_transform(
+                    self.target_frame, msg.header.frame_id, rospy.Time(),
+                    rospy.Duration(1.0))
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                    tf2_ros.ExtrapolationException) as error:
+                print('Failed to transform. Error: {}'.format(error))
+
+        init_pose = tf2_geometry_msgs.do_transform_pose(pose, trans).pose
+        (init_roll, init_pitch, init_yaw) = euler_from_quaternion([
+            init_pose.orientation.x, init_pose.orientation.y,
+            init_pose.orientation.z, init_pose.orientation.w
+        ])
+        mean_state = [
+            init_pose.position.x, init_pose.position.y, init_pose.position.z,
+            init_roll, init_pitch, init_yaw
+        ]
+        particles = np.array(mean_state * self.num_particles).reshape(
+            self.num_particles, self.num_states)
+
+        #TODO: set spread at the proper place and to the proper value
+        particles += np.random.uniform(low=-.1, high=.1, size=particles.shape)
+        # Angles should be between (-pi, pi)
+        particles[:, -3:] = (particles[:, -3:] + np.pi) % (2 * np.pi) - np.pi
+        return particles
+
+    def _init_weights(self):
+        return np.array([1.0 / self.num_states] * self.num_states)
+
     def run(self):
-        random_xs = np.random.randint(643785, 643815, size=self.num_particles)
-        random_ys = np.random.randint(6459246,
-                                      6459276,
-                                      size=self.num_particles)
-        self.particles[:, 0] = random_xs
-        self.particles[:, 1] = random_ys
+        self.particles[:, 0] += np.random.uniform(low=-.01,
+                                                  high=.01,
+                                                  size=self.num_particles)
+        self.particles[:, 1] += np.random.uniform(low=-.01,
+                                                  high=.01,
+                                                  size=self.num_particles)
 
         self.particles_msg.data = self.particles.flatten()
         self.particles_pub.publish(self.particles_msg)
@@ -55,8 +106,9 @@ def main():
 
     num_particles = 100
     num_states = 6
+    process_noise = [.1, .1, .1, .1, .1]
 
-    particle_filter = ParticleFilter(num_particles, num_states)
+    particle_filter = ParticleFilter(num_particles, num_states, process_noise)
 
     while not rospy.is_shutdown():
         particle_filter.run()
