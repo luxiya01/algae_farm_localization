@@ -34,15 +34,12 @@ class Vizualizer:
         self.env_lims = self._set_envlims(ax_lims)
 
         self.fig, self.ax = plt.subplots()
-        self.init_plot()
+        self.environment_handles = self.init_plot()
 
-        #self.particles_topic = '/{}/localization/particles'.format(
-        #    self.robot_name)
-        #self.particles = None
-        #self.particle_color = 'b'
-        #self._setup_particle_subscriber()
-
+        self.particles = None
         self.groundtruth_pose = None
+        self.groundtruth_line = self.init_groundtruth_pose_plot()
+        self.particles_line = self.init_particles_plot()
 
     def _get_robot_name(self):
         """Get robot name if exist, else use default = sam"""
@@ -82,49 +79,37 @@ class Vizualizer:
         self.groundtruth_line.set_ydata(self.groundtruth_pose.pose.position.y)
         return self.groundtruth_line
 
-    def _setup_particle_subscriber(self):
-        self.particle_sub = rospy.Subscriber(self.particles_topic,
-                                             Float64MultiArray,
-                                             self._update_particles)
-
-    def _update_particles(self, msg):
-        # Initialize particles for the first time
-        if self.particles is None:
-            self._init_particles(msg)
-
+    def update_particles(self, msg):
+        num_particles = msg.layout.dim[0].size
+        num_states = msg.layout.dim[1].size
         offset = msg.layout.data_offset
-        self.particles = np.array(msg.data).reshape(self.particles.shape)
 
-    def _init_particles(self, msg):
-        particles_dim = [x.size for x in msg.layout.dim]
-        self.particles = np.zeros((particles_dim))
-        line, = self.ax.plot(self.particles[0, :],
-                             self.particles[1, :],
-                             label='particles',
-                             c=self.particle_color,
-                             marker='o',
-                             ls='')
+        self.particles = np.array(msg.data[offset:]).reshape(
+            num_particles, num_states)
 
+    def init_particles_plot(self):
+        self.particles_line, = self.ax.plot([], [],
+                                            label='particles',
+                                            c='b',
+                                            marker='o',
+                                            ls='',
+                                            markersize=1)
+        return self.particles_line
 
-#       animation.FuncAnimation(self.fig,
-#                               self._animate_particles,
-#                               fargs=(line, ),
-#                               interval=50,
-#                               blit=True)
-
-    def _animate_particles(self, i, line):
+    def animate_particles(self, i):
         """
         This method is periodically called by FuncAnimation to update the
         environment plot with the new particle states.
 
         Args:
             - i: frame id
-            - line: line plot object to be updated
         """
-        line.set_xdata(self.particles[0, :])
-        line.set_ydata(self.particles[1, :])
-
-        return line,
+        if self.particles is not None:
+            self.particles_line.set_xdata(self.particles[:, 0])
+            self.particles_line.set_ydata(self.particles[:, 1])
+            print('update particle line')
+            print(self.particles)
+        return self.particles_line
 
     def _init_map_objects(self):
         """Wait for /{robot_name}/sim/marked_positions to publish its first
@@ -172,29 +157,30 @@ class Vizualizer:
         self.ax.set_xlim(self.env_lims['x'])
         self.ax.set_ylim(self.env_lims['y'])
 
-        self._static_env_plot()
+        environment_handles = self._static_env_plot()
 
-        plt.legend(bbox_to_anchor=(1.01, 1),
-                   loc='upper left',
-                   borderaxespad=0.)
         plt.title('Environment')
         plt.xlabel('x (m)')
         plt.ylabel('y (m)')
+        return environment_handles
 
     def _static_env_plot(self):
         """
         Plot the map consisting of self.map_objects in 2D plot onto the
         Visualizer's Axes object.
         """
+        environment_handles = []
 
         for obj_id, obj_val in self.map_objects.items():
             # Plot as continuous line or individual point depending on the info given
             if isinstance(obj_val['x'], float):
-                self.ax.scatter(obj_val['x'],
-                                obj_val['y'],
-                                c=obj_val['c'],
-                                s=obj_val['s'] * 10,
-                                label=obj_id)
+                handle, = self.ax.plot(obj_val['x'],
+                                       obj_val['y'],
+                                       c=obj_val['c'],
+                                       marker='o',
+                                       ls='',
+                                       markersize=obj_val['s'] * 10,
+                                       label=obj_id)
             elif isinstance(obj_val['x'], tuple):
                 x = np.linspace(max(obj_val['x'][0], self.env_lims['x'][0]),
                                 min(obj_val['x'][1], self.env_lims['x'][1]),
@@ -202,11 +188,14 @@ class Vizualizer:
                 y = np.linspace(max(obj_val['y'][0], self.env_lims['y'][0]),
                                 min(obj_val['y'][1], self.env_lims['y'][1]),
                                 num=100)
-                self.ax.plot(x,
-                             y,
-                             c=obj_val['c'],
-                             linewidth=obj_val['s'],
-                             label=obj_id)
+                handle, = self.ax.plot(x,
+                                       y,
+                                       c=obj_val['c'],
+                                       linewidth=obj_val['s'],
+                                       label=obj_id)
+            environment_handles.append(handle)
+
+        return environment_handles
 
 
 def main():
@@ -215,15 +204,31 @@ def main():
 
     viz = Vizualizer()
 
+    print(viz.env_lims)
+
+    #TODO: refactor - merge init and animate functions for both groundtruth and particles
     groundtruth_topic = '/{}/sim/odom'.format(viz.robot_name)
     groundtruth_pose_sub = rospy.Subscriber(groundtruth_topic, Odometry,
                                             viz.update_groundtruth_pose)
-    # It's important to assign this the FuncAnimation to a variable
-    # Otherwise it will be ignored and not run
-    ani = animation.FuncAnimation(viz.fig,
-                                  viz.animate_groundtruth_pose,
-                                  interval=50,
-                                  init_func=viz.init_groundtruth_pose_plot)
+    # It's important to store the FuncAnimation to a variable
+    # Otherwise the animation object will be collected by the garbage collector
+    animate_groundtruth = animation.FuncAnimation(viz.fig,
+                                                  viz.animate_groundtruth_pose,
+                                                  interval=50)
+
+    particles_topic = '{}/localization/particles'.format(viz.robot_name)
+    particles_sub = rospy.Subscriber(particles_topic, Float64MultiArray,
+                                     viz.update_particles)
+    animate_particles = animation.FuncAnimation(viz.fig,
+                                                viz.animate_particles,
+                                                interval=50)
+
+    legend_handles = viz.environment_handles
+    legend_handles.extend([viz.groundtruth_line, viz.particles_line])
+    plt.legend(handles=legend_handles,
+               bbox_to_anchor=(1.01, 1),
+               loc='upper left',
+               borderaxespad=0.)
     plt.show(block=True)
 
 
