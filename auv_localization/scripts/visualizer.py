@@ -107,8 +107,6 @@ class Vizualizer:
         if self.particles is not None:
             self.particles_line.set_xdata(self.particles[:, 0])
             self.particles_line.set_ydata(self.particles[:, 1])
-            print('update particle line')
-            print(self.particles)
         return self.particles_line
 
     def _init_map_objects(self):
