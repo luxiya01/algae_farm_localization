@@ -32,18 +32,21 @@ class ParticleFilter:
                                              queue_size=5)
 
         # Motion model related
-        self.thrusts = [0, 0]
-        self.thruster0_sub = self._setup_thruster_sub(0)
+        self.thrusts = {1: 0, 2: 0}
         self.thruster1_sub = self._setup_thruster_sub(1)
+        self.thruster2_sub = self._setup_thruster_sub(2)
         self.coeff = .0005
         self.imu = Imu()
+        self.imu_sub = self._setup_imu_sub()
 
+        # Update
         self.dt = .1
         self.timer = rospy.Timer(rospy.Duration(self.dt), self.run)
 
     def _setup_imu_sub(self):
         imu_topic = '/{}/core/sbg_imu'.format(self.robot_name)
         imu_sub = rospy.Subscriber(imu_topic, Imu, self._update_imu)
+        return imu_sub
 
     def _update_imu(self, msg):
         self.imu = msg
@@ -126,7 +129,7 @@ class ParticleFilter:
         self.particles_pub.publish(self.particles_msg)
 
     def motion_model(self):
-        thrust = self.thrusts[0] * self.thrusts[1] * self.coeff
+        thrust = (self.thrusts[1] + self.thrusts[2]) * self.coeff
         linear_velocity = np.array([thrust, 0, 0]).reshape(3, 1)
         (roll, pitch, yaw) = euler_from_quaternion([
             self.imu.orientation.x, self.imu.orientation.y,
@@ -134,6 +137,7 @@ class ParticleFilter:
         ])
         rotation = self._compute_rotation(roll, pitch, yaw)
         velocity = np.matmul(rotation, linear_velocity)
+        print('thrust: {}, velocity: {}'.format(thrust, velocity))
 
         # TODO: set proper process noise for displacement and orientation
         # separately?
