@@ -6,7 +6,9 @@ import tf2_geometry_msgs
 from tf.transformations import quaternion_from_euler, euler_from_quaternion
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Float64MultiArray, MultiArrayLayout, MultiArrayDimension
+from visualization_msgs.msg import MarkerArray
 from smarc_msgs.msg import ThrusterFeedback
+from vision_msgs.msg import ObjectHypothesisWithPose, Detection2DArray, Detection2D
 from sensor_msgs.msg import Imu
 import numpy as np
 
@@ -39,9 +41,70 @@ class ParticleFilter:
         self.imu = Imu()
         self.imu_sub = self._setup_imu_sub()
 
+        # Measurement model related
+        self.landmarks = self._read_landmarks()
+        self.num_landmarks = self.landmarks.shape[0]
+        self.observation_sub = self._setup_observation_sub()
+
         # Update
         self.dt = .1
         self.timer = rospy.Timer(rospy.Duration(self.dt), self.run)
+
+    def _read_landmarks(self):
+        """Wait for /{robot_name}/sim/marked_positions to publish its first
+        message, use it to initialize landmarks array."""
+
+        marked_pos_topic = '/{}/sim/marked_positions'.format(self.robot_name)
+        msg = rospy.wait_for_message(marked_pos_topic, MarkerArray)
+
+        landmarks = []
+        for marker in msg.markers:
+            landmarks.append([
+                marker.pose.position.x, marker.pose.position.y,
+                marker.pose.position.z
+            ])
+        return np.array(landmarks)
+
+    def predicted_measurement(self):
+        # vectors pointing from particles to landmarks: (num_landmarks, num_particles, 3)
+        particle_to_landmark_vec = np.stack([
+            self.landmarks[i, :] - self.particles[:, :3]
+            for i in range(self.num_landmarks)
+        ])
+        # distance between particles and landmarks: (num_landmarks, num_particles)
+        dist = np.linalg.norm(particle_to_landmark_vec, axis=2)
+
+        # convert particles to landmark vector into unit vectors
+        particle_to_landmark_vec_normalized = particle_to_landmark_vec / dist
+
+        # compute heading
+        heading = np.stack([
+            np.cos(self.particles[:-1]) * np.cos(self.particles[:, -2]),
+            np.sin(self.particles[:, -1]) * np.cos(self.particles[:, -2]),
+            np.sin(self.particles[:, -2])
+        ])
+        # normalize heading
+        heading_normalized = heading / np.linalg.norm(heading, axis=1)
+
+        # compute cos angle between heading and particle_to_landmark_vec
+        dot_prod = np.dot(particle_to_landmark_vec_normalized,
+                          heading_normalized.T)
+        # cos: (num_landmarks, num_particles)
+        cos = np.stack(
+            [dot_prod[i, :].diagonal() for i in range(self.num_landmarks)])
+        #TODO: set threshold at the proper place!
+        thresh = .05
+        observable = np.abs(cos) <= thresh
+
+    def _setup_observation_sub(self):
+        obs_topic = '/{}/sim/sidescan/detection_hypothesis'.format(
+            self.robot_name)
+        obs_sub = rospy.Subscriber(obs_topic, Detection2DArray,
+                                   self._update_measurement)
+
+    def _update_measurement(self, msg):
+        #TODO: incorporate measurement
+        pass
 
     def _setup_imu_sub(self):
         imu_topic = '/{}/core/sbg_imu'.format(self.robot_name)
@@ -157,6 +220,11 @@ class ParticleFilter:
                        [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]])
         rotation = np.matmul(rz, np.matmul(ry, rx))
         return rotation
+
+    def measurement_model(self):
+        #TODO: setup listeners for observations
+        #TODO: update particle weights based on measurement model
+        pass
 
 
 def main():
