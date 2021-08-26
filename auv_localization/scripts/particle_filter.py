@@ -277,14 +277,7 @@ class ParticleFilter:
                            stop=1.,
                            step=1. / self.num_particles)
 
-        indices = []
-        i, j = 0, 0
-        while i < len(cumsum) and j < len(thresh):
-            if cumsum[i] >= thresh[j]:
-                indices.append(i)
-                j += 1
-            else:
-                i += 1
+        indices = np.searchsorted(cumsum, thresh)
         return self.particles[indices, :]
 
 
