@@ -11,20 +11,22 @@ from smarc_msgs.msg import ThrusterFeedback
 from vision_msgs.msg import ObjectHypothesisWithPose, Detection2DArray, Detection2D
 from sensor_msgs.msg import Imu
 import numpy as np
+from scipy.stats import norm
 
 
 class ParticleFilter:
-    def __init__(self, num_particles, num_states, process_noise):
+    def __init__(self, num_particles, num_states, process_noise,
+                 measurement_noise):
         self.robot_name = self._get_robot_name()
         self.num_particles = num_particles
         self.num_states = num_states
         self.process_noise = process_noise
+        self.measurement_noise = measurement_noise
 
         self.target_frame = 'utm'
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
         self.particles = self._init_particles_for_tracking()
-        self.weights = self._init_weights()
 
         self.particles_msg = self._init_particles_msg()
         self.particles_topic = '/{}/localization/particles'.format(
@@ -42,13 +44,30 @@ class ParticleFilter:
         self.imu_sub = self._setup_imu_sub()
 
         # Measurement model related
+        self.weights = self._init_weights()
         self.landmarks = self._read_landmarks()
         self.num_landmarks = self.landmarks.shape[0]
-        self.observation_sub = self._setup_observation_sub()
+        self.measurements = np.array([[]])
+        self.measurement_sub = self._setup_measurement_sub()
+        self.has_new_measurements = False
 
         # Update
         self.dt = .1
         self.timer = rospy.Timer(rospy.Duration(self.dt), self.run)
+
+    def _setup_measurement_sub(self):
+        obs_topic = '/{}/sim/sidescan/detection_hypothesis'.format(
+            self.robot_name)
+        obs_sub = rospy.Subscriber(obs_topic, Detection2DArray,
+                                   self._update_measurement)
+        return obs_sub
+
+    def _update_measurement(self, msg):
+        self.has_new_measurements = True
+
+        self.measurements = np.array([[d.results[i].pose.pose.position.y]
+                                      for d in msg.detections
+                                      for i in range(len(d.results))])
 
     def _read_landmarks(self):
         """Wait for /{robot_name}/sim/marked_positions to publish its first
@@ -64,47 +83,6 @@ class ParticleFilter:
                 marker.pose.position.z
             ])
         return np.array(landmarks)
-
-    def predicted_measurement(self):
-        # vectors pointing from particles to landmarks: (num_landmarks, num_particles, 3)
-        particle_to_landmark_vec = np.stack([
-            self.landmarks[i, :] - self.particles[:, :3]
-            for i in range(self.num_landmarks)
-        ])
-        # distance between particles and landmarks: (num_landmarks, num_particles)
-        dist = np.linalg.norm(particle_to_landmark_vec, axis=2)
-
-        # convert particles to landmark vector into unit vectors
-        particle_to_landmark_vec_normalized = particle_to_landmark_vec / dist
-
-        # compute heading
-        heading = np.stack([
-            np.cos(self.particles[:-1]) * np.cos(self.particles[:, -2]),
-            np.sin(self.particles[:, -1]) * np.cos(self.particles[:, -2]),
-            np.sin(self.particles[:, -2])
-        ])
-        # normalize heading
-        heading_normalized = heading / np.linalg.norm(heading, axis=1)
-
-        # compute cos angle between heading and particle_to_landmark_vec
-        dot_prod = np.dot(particle_to_landmark_vec_normalized,
-                          heading_normalized.T)
-        # cos: (num_landmarks, num_particles)
-        cos = np.stack(
-            [dot_prod[i, :].diagonal() for i in range(self.num_landmarks)])
-        #TODO: set threshold at the proper place!
-        thresh = .05
-        observable = np.abs(cos) <= thresh
-
-    def _setup_observation_sub(self):
-        obs_topic = '/{}/sim/sidescan/detection_hypothesis'.format(
-            self.robot_name)
-        obs_sub = rospy.Subscriber(obs_topic, Detection2DArray,
-                                   self._update_measurement)
-
-    def _update_measurement(self, msg):
-        #TODO: incorporate measurement
-        pass
 
     def _setup_imu_sub(self):
         imu_topic = '/{}/core/sbg_imu'.format(self.robot_name)
@@ -188,6 +166,11 @@ class ParticleFilter:
 
     def run(self, timer):
         self.motion_model()
+        if self.has_new_measurements:
+            print('Resampling!')
+            self.weights = self.measurement_model()
+            print(self.weights)
+            self.particles = self.systematic_resampling()
         self.particles_msg.data = self.particles.flatten()
         self.particles_pub.publish(self.particles_msg)
 
@@ -222,9 +205,87 @@ class ParticleFilter:
         return rotation
 
     def measurement_model(self):
-        #TODO: setup listeners for observations
-        #TODO: update particle weights based on measurement model
-        pass
+        self.has_new_measurements = False
+        # prediction: (num_landmarks, num_particles)
+        prediction = self.predicted_measurement()
+
+        # likelihood: (num_measurements, num_landmarks, num_particles)
+        likelihood = np.stack([
+            norm(prediction,
+                 self.measurement_noise).pdf(self.measurements[i, :])
+            for i in range(len(self.measurements))
+        ])
+
+        # association: (num_measurements, num_particles)
+        # association = np.argmax(likelihood, axis=1)
+        ml_likelihood = np.max(likelihood, axis=1)
+
+        # assumes i.i.d. measurements
+        weights = np.sum(ml_likelihood, axis=0)
+        weights += np.finfo(float).eps
+        weights /= np.sum(weights)
+        return weights
+
+    def predicted_measurement(self):
+        """Compute predicted sidescan measurement for all landmarks from all
+        particles. Note that the sidescan measurement only consists of a range
+        measure in meters. Only landmarks within a certain threshold of
+        angles are deemed observable, the others have predicted measurement set
+        to inf.
+        Returns:
+            - dist: (num_landmarks, num_particles)
+        """
+        #TODO: correct predicted measurement
+        # vectors pointing from particles to landmarks: (num_landmarks, num_particles, 3)
+        particle_to_landmark_vec = np.stack([
+            self.landmarks[i, :] - self.particles[:, :3]
+            for i in range(self.num_landmarks)
+        ])
+        # distance between particles and landmarks: (num_landmarks, num_particles)
+        dist = np.linalg.norm(particle_to_landmark_vec, axis=2)
+
+        # convert particles to landmark vector into unit vectors
+        particle_to_landmark_vec_normalized = particle_to_landmark_vec / dist.reshape(
+            self.num_landmarks, self.num_particles, 1)
+
+        # compute heading
+        heading = np.stack([
+            np.cos(self.particles[:, -1]) * np.cos(self.particles[:, -2]),
+            np.sin(self.particles[:, -1]) * np.cos(self.particles[:, -2]),
+            np.sin(self.particles[:, -2])
+        ])
+        # normalize heading
+        heading_normalized = heading / np.linalg.norm(heading, axis=0)
+
+        # compute cos angle between heading and particle_to_landmark_vec
+        dot_prod = np.dot(particle_to_landmark_vec_normalized,
+                          heading_normalized)
+        # cos: (num_landmarks, num_particles)
+        cos = np.stack(
+            [dot_prod[i, :].diagonal() for i in range(self.num_landmarks)])
+
+        #TODO: set threshold at the proper place to the proper value
+        thresh = .05
+        observable = np.abs(cos) <= thresh
+        dist[~observable] = np.inf
+        return dist
+
+    def systematic_resampling(self):
+        cumsum = np.cumsum(self.weights)
+        random_nr = np.random.rand() / self.num_particles
+        thresh = np.arange(start=random_nr,
+                           stop=1.,
+                           step=1. / self.num_particles)
+
+        indices = []
+        i, j = 0, 0
+        while i < len(cumsum) and j < len(thresh):
+            if cumsum[i] >= thresh[j]:
+                indices.append(i)
+                j += 1
+            else:
+                i += 1
+        return self.particles[indices, :]
 
 
 def main():
@@ -234,8 +295,10 @@ def main():
     num_particles = 100
     num_states = 6
     process_noise = .1
+    measurement_noise = .1
 
-    particle_filter = ParticleFilter(num_particles, num_states, process_noise)
+    particle_filter = ParticleFilter(num_particles, num_states, process_noise,
+                                     measurement_noise)
 
     while not rospy.is_shutdown():
         rospy.spin()
