@@ -5,8 +5,9 @@ import tf2_ros
 import tf2_geometry_msgs
 from visualization_msgs.msg import MarkerArray
 from std_msgs.msg import Float64MultiArray
-from nav_msgs.msg import Odometry
-from geometry_msgs.msg import PoseWithCovarianceStamped
+from tf2_msgs.msg import TFMessage
+from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped
+from vision_msgs.msg import Detection2DArray
 from matplotlib import animation
 from matplotlib import pyplot as plt
 import numpy as np
@@ -27,8 +28,9 @@ class Vizualizer:
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
 
-        self.target_frame = 'utm'
         self.robot_name = self._get_robot_name()
+        self.target_frame = 'utm'
+        self.groundtruth_frame = 'gt/{}/base_link'.format(self.robot_name)
         self.boundary = boundary
         self.map_objects = self._init_map_objects()
         self.env_lims = self._set_envlims(ax_lims)
@@ -38,8 +40,15 @@ class Vizualizer:
 
         self.particles = None
         self.groundtruth_pose = None
-        self.groundtruth_line = self.init_groundtruth_pose_plot()
-        self.particles_line = self.init_particles_plot()
+        self.measurements = None
+        self.groundtruth_line = self.init_empty_line_plot(
+            label='groundtruth_pose', color='g', markersize=3)
+        self.particles_line = self.init_empty_line_plot(label='particles',
+                                                        color='b',
+                                                        markersize=1)
+        self.measurement_line = self.init_empty_line_plot(label='measurements',
+                                                          color='k',
+                                                          markersize=3)
 
     def _get_robot_name(self):
         """Get robot name if exist, else use default = sam"""
@@ -47,25 +56,45 @@ class Vizualizer:
             return rospy.get_param('~robot_name')
         return 'sam'
 
-    def update_groundtruth_pose(self, msg):
-        pose = msg.pose
-        try:
-            trans = self.tf_buffer.lookup_transform(self.target_frame,
-                                                    msg.header.frame_id,
-                                                    rospy.Time())
-            self.groundtruth_pose = tf2_geometry_msgs.do_transform_pose(
-                pose, trans)
-        except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
-                tf2_ros.ExtrapolationException) as error:
-            print('Failed to transform. Error: {}'.format(error))
+    def _wait_for_transform(self, from_frame):
+        """Wait for transform from from_frame to self.target_frame"""
+        trans = None
+        while trans is None:
+            try:
+                trans = self.tf_buffer.lookup_transform(
+                    self.target_frame, from_frame, rospy.Time())
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                    tf2_ros.ExtrapolationException) as error:
+                print('Failed to transform. Error: {}'.format(error))
+        return trans
 
-    def init_groundtruth_pose_plot(self):
-        self.groundtruth_line, = self.ax.plot([], [],
-                                              label='groundtruth_pose',
-                                              c='g',
-                                              marker='o',
-                                              ls='')
-        return self.groundtruth_line
+    def update_measurements(self, msg):
+        pose = msg.detections[0].results[0].pose
+        trans = self._wait_for_transform(from_frame=msg.header.frame_id)
+        self.measurements = tf2_geometry_msgs.do_transform_pose(pose, trans)
+
+    def _tf_to_pose(self, trans_stamped):
+        pose_stamped = PoseStamped()
+        pose_stamped.header.stamp = rospy.Time()
+        pose_stamped.header.frame_id = self.target_frame
+
+        trans = trans_stamped.transform
+        pose_stamped.pose.position = trans.translation
+        pose_stamped.pose.orientation = trans.rotation
+        return pose_stamped
+
+    def update_groundtruth_pose(self, msg):
+        trans = self._wait_for_transform(from_frame=self.groundtruth_frame)
+        self.groundtruth_pose = self._tf_to_pose(trans)
+
+    def init_empty_line_plot(self, label, color, markersize):
+        line, = self.ax.plot([], [],
+                             label=label,
+                             c=color,
+                             marker='o',
+                             ls='',
+                             markersize=markersize)
+        return line
 
     def animate_groundtruth_pose(self, i):
         """
@@ -74,10 +103,30 @@ class Vizualizer:
 
         Args:
             - i: frame id
+            - line: the line object
         """
-        self.groundtruth_line.set_xdata(self.groundtruth_pose.pose.position.x)
-        self.groundtruth_line.set_ydata(self.groundtruth_pose.pose.position.y)
-        return self.groundtruth_line
+        x, y = [], []
+        if self.groundtruth_pose is not None:
+            x = self.groundtruth_pose.pose.position.x
+            y = self.groundtruth_pose.pose.position.y
+        self.groundtruth_line.set_xdata(x)
+        self.groundtruth_line.set_ydata(y)
+
+    def animate_measurement_pose(self, i):
+        """
+        This method is periodically called by FuncAnimation to update the
+        environment plot with the new measurement pose.
+
+        Args:
+            - i: frame id
+            - line: the line object
+        """
+        x, y = [], []
+        if self.measurements is not None:
+            x = self.measurements.pose.position.x
+            y = self.measurements.pose.position.y
+        self.measurement_line.set_xdata(x)
+        self.measurement_line.set_ydata(y)
 
     def update_particles(self, msg):
         num_particles = msg.layout.dim[0].size
@@ -86,15 +135,6 @@ class Vizualizer:
 
         self.particles = np.array(msg.data[offset:]).reshape(
             num_particles, num_states)
-
-    def init_particles_plot(self):
-        self.particles_line, = self.ax.plot([], [],
-                                            label='particles',
-                                            c='b',
-                                            marker='o',
-                                            ls='',
-                                            markersize=1)
-        return self.particles_line
 
     def animate_particles(self, i):
         """
@@ -205,8 +245,7 @@ def main():
     print(viz.env_lims)
 
     #TODO: refactor - merge init and animate functions for both groundtruth and particles
-    groundtruth_topic = '/{}/sim/odom'.format(viz.robot_name)
-    groundtruth_pose_sub = rospy.Subscriber(groundtruth_topic, Odometry,
+    groundtruth_pose_sub = rospy.Subscriber('/tf', TFMessage,
                                             viz.update_groundtruth_pose)
     # It's important to store the FuncAnimation to a variable
     # Otherwise the animation object will be collected by the garbage collector
@@ -221,8 +260,16 @@ def main():
                                                 viz.animate_particles,
                                                 interval=50)
 
+    measurement_topic = '/{}/sim/sidescan/detection_hypothesis'.format(
+        viz.robot_name)
+    measurement_sub = rospy.Subscriber(measurement_topic, Detection2DArray,
+                                       viz.update_measurements)
+    animate_measurements = animation.FuncAnimation(
+        viz.fig, viz.animate_measurement_pose, interval=50)
+
     legend_handles = viz.environment_handles
-    legend_handles.extend([viz.groundtruth_line, viz.particles_line])
+    legend_handles.extend(
+        [viz.groundtruth_line, viz.particles_line, viz.measurement_line])
     plt.legend(handles=legend_handles,
                bbox_to_anchor=(1.01, 1),
                loc='upper left',
