@@ -65,9 +65,21 @@ class ParticleFilter:
     def _update_measurement(self, msg):
         self.has_new_measurements = True
 
-        self.measurements = np.array([[d.results[i].pose.pose.position.y]
-                                      for d in msg.detections
-                                      for i in range(len(d.results))])
+        trans = self._wait_for_transform(from_frame=msg.header.frame_id,
+                                         to_frame='{}/base_link'.format(
+                                             self.robot_name))
+
+        measurements = []
+        for d in msg.detections:
+            for r in d.results:
+                pose = r.pose
+                pose_transformed = tf2_geometry_msgs.do_transform_pose(
+                    pose, trans)
+                measurements.append([
+                    np.sqrt(pose_transformed.pose.position.x**2 +
+                            pose_transformed.pose.position.y**2)
+                ])
+        self.measurements = np.array(measurements)
 
     def _read_landmarks(self):
         """Wait for /{robot_name}/sim/marked_positions to publish its first
@@ -119,6 +131,17 @@ class ParticleFilter:
                                          data=self.particles.flatten())
         return particle_msg
 
+    def _wait_for_transform(self, from_frame, to_frame):
+        trans = None
+        while trans is None:
+            try:
+                trans = self.tf_buffer.lookup_transform(
+                    to_frame, from_frame, rospy.Time(), rospy.Duration(1.0))
+            except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
+                    tf2_ros.ExtrapolationException) as error:
+                print('Failed to transform. Error: {}'.format(error))
+        return trans
+
     def _init_particles_for_tracking(self):
 
         particles = np.zeros((self.num_particles, self.num_states))
@@ -129,15 +152,8 @@ class ParticleFilter:
         print('odom msg: {}'.format(msg))
         pose = msg.pose
 
-        trans = None
-        while trans is None:
-            try:
-                trans = self.tf_buffer.lookup_transform(
-                    self.target_frame, msg.header.frame_id, rospy.Time(),
-                    rospy.Duration(1.0))
-            except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
-                    tf2_ros.ExtrapolationException) as error:
-                print('Failed to transform. Error: {}'.format(error))
+        trans = self._wait_for_transform(from_frame=msg.header.frame_id,
+                                         to_frame=self.target_frame)
 
         init_pose = tf2_geometry_msgs.do_transform_pose(pose, trans).pose
         (init_roll, init_pitch, init_yaw) = euler_from_quaternion([
@@ -167,10 +183,9 @@ class ParticleFilter:
     def run(self, timer):
         self.motion_model()
         if self.has_new_measurements:
-            print('Resampling!')
             self.weights = self.measurement_model()
-            print(self.weights)
             self.particles = self.systematic_resampling()
+            self.weights = self._init_weights()
         self.particles_msg.data = self.particles.flatten()
         self.particles_pub.publish(self.particles_msg)
 
@@ -183,7 +198,6 @@ class ParticleFilter:
         ])
         rotation = self._compute_rotation(roll, pitch, yaw)
         velocity = np.matmul(rotation, linear_velocity)
-        print('thrust: {}, velocity: {}'.format(thrust, velocity))
 
         # TODO: set proper process noise for displacement and orientation
         # separately?
@@ -285,9 +299,9 @@ def main():
     rospy.init_node('particle_filter', anonymous=True)
     rospy.Rate(5)
 
-    num_particles = 100
+    num_particles = 200
     num_states = 6
-    process_noise = .1
+    process_noise = .2
     measurement_noise = .1
 
     particle_filter = ParticleFilter(num_particles, num_states, process_noise,
