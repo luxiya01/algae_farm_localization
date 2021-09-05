@@ -56,7 +56,7 @@ class ParticleFilter:
         self.timer = rospy.Timer(rospy.Duration(self.dt), self.run)
 
     def _setup_measurement_sub(self):
-        obs_topic = '/{}/sim/sidescan/detection_hypothesis'.format(
+        obs_topic = '/{}/payload/sidescan/detection_hypothesis'.format(
             self.robot_name)
         obs_sub = rospy.Subscriber(obs_topic, Detection2DArray,
                                    self._update_measurement)
@@ -75,10 +75,7 @@ class ParticleFilter:
                 pose = r.pose
                 pose_transformed = tf2_geometry_msgs.do_transform_pose(
                     pose, trans)
-                measurements.append([
-                    np.sqrt(pose_transformed.pose.position.x**2 +
-                            pose_transformed.pose.position.y**2)
-                ])
+                measurements.append([pose_transformed.pose.position.y])
         self.measurements = np.array(measurements)
 
     def _read_landmarks(self):
@@ -184,6 +181,7 @@ class ParticleFilter:
         self.motion_model()
         if self.has_new_measurements:
             self.weights = self.measurement_model()
+            print(self.weights)
             self.particles = self.systematic_resampling()
             self.weights = self._init_weights()
         self.particles_msg.data = self.particles.flatten()
@@ -278,10 +276,18 @@ class ParticleFilter:
         cos = np.stack(
             [dot_prod[i, :].diagonal() for i in range(self.num_landmarks)])
 
+        # compute expected channel (port or starboard) of the measurement
+        # sign>0 indicates starboard, sign<0 indicates port
+        cross = np.cross(particle_to_landmark_vec_normalized,
+                         heading_normalized.T)
+        z_axis = np.array([0, 0, 1])
+        sign = np.dot(cross, z_axis)
+
         #TODO: set threshold at the proper place to the proper value
         thresh = .05
         observable = np.abs(cos) <= thresh
         dist[~observable] = np.inf
+        dist[sign < 0] *= -1
         return dist
 
     def systematic_resampling(self):
@@ -299,9 +305,9 @@ def main():
     rospy.init_node('particle_filter', anonymous=True)
     rospy.Rate(5)
 
-    num_particles = 200
+    num_particles = 50
     num_states = 6
-    process_noise = .2
+    process_noise = .1
     measurement_noise = .1
 
     particle_filter = ParticleFilter(num_particles, num_states, process_noise,
