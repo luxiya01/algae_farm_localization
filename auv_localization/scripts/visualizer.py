@@ -260,7 +260,7 @@ def main():
                                                 viz.animate_particles,
                                                 interval=50)
 
-    measurement_topic = '/{}/sim/sidescan/detection_hypothesis'.format(
+    measurement_topic = '/{}/payload/sidescan/detection_hypothesis'.format(
         viz.robot_name)
     measurement_sub = rospy.Subscriber(measurement_topic, Detection2DArray,
                                        viz.update_measurements)
