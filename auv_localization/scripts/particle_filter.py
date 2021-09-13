@@ -15,13 +15,16 @@ from scipy.stats import norm
 
 
 class ParticleFilter:
-    def __init__(self, num_particles, num_states, process_noise,
-                 measurement_noise):
+    def __init__(self, num_particles, num_states, positional_process_noise,
+                 rotational_process_noise, measurement_noise,
+                 sidescan_half_horizontal_beam_width):
         self.robot_name = self._get_robot_name()
         self.num_particles = num_particles
         self.num_states = num_states
-        self.process_noise = process_noise
+        self.positional_process_noise = positional_process_noise
+        self.rotational_process_noise = rotational_process_noise
         self.measurement_noise = measurement_noise
+        self.sidescan_half_horizontal_beam_width = sidescan_half_horizontal_beam_width
 
         self.target_frame = 'utm'
         self.tf_buffer = tf2_ros.Buffer()
@@ -44,7 +47,6 @@ class ParticleFilter:
         self.imu_sub = self._setup_imu_sub()
 
         # Measurement model related
-        self.forward_vec = self._get_forward_vec()
         self.weights = self._init_weights()
         self.landmarks = self._read_landmarks()
         self.num_landmarks = self.landmarks.shape[0]
@@ -55,17 +57,6 @@ class ParticleFilter:
         # Update
         self.dt = .1
         self.timer = rospy.Timer(rospy.Duration(self.dt), self.run)
-
-    def _get_forward_vec(self):
-        """Define forward vector as a vector pointing from base_link to
-        battery_link. Used to determine the appropriate sign of the predicted
-        measurement."""
-        trans = self._wait_for_transform(
-            from_frame='{}/battery_link'.format(self.robot_name),
-            to_frame='{}/base_link'.format(self.robot_name))
-        pose = trans.transform.translation
-        forward_vec = np.array([pose.x, pose.y, pose.z]).reshape(3, 1)
-        return forward_vec
 
     def _setup_measurement_sub(self):
         obs_topic = '/{}/payload/sidescan/detection_hypothesis'.format(
@@ -193,7 +184,7 @@ class ParticleFilter:
         self.motion_model()
         if self.has_new_measurements:
             self.weights = self.measurement_model()
-            print(self.weights)
+            # print(self.weights)
             self.particles = self.systematic_resampling()
             self.weights = self._init_weights()
         self.particles_msg.data = self.particles.flatten()
@@ -209,14 +200,14 @@ class ParticleFilter:
         rotation = self._compute_rotation(roll, pitch, yaw)
         velocity = np.matmul(rotation, linear_velocity)
 
-        # TODO: set proper process noise for displacement and orientation
-        # separately?
         self.particles[:, :3] += (velocity * self.dt).reshape(1, 3)
         self.particles[:, -3:] = [roll, pitch, yaw]
+
         # Diffusion
-        #TODO: diffuse orientation
-        self.particles[:, :3] += np.random.randn(self.num_particles,
-                                                 3) * self.process_noise
+        self.particles[:, :3] += np.random.randn(
+            self.num_particles, 3) * self.positional_process_noise
+        self.particles[:, -3:] += np.random.randn(
+            self.num_particles, 3) * self.rotational_process_noise
         self.particles = self._normalize_angles(self.particles)
 
     def _compute_rotation(self, roll, pitch, yaw):
@@ -260,7 +251,6 @@ class ParticleFilter:
         Returns:
             - dist: (num_landmarks, num_particles)
         """
-        #TODO: correct predicted measurement
         # vectors pointing from particles to landmarks: (num_landmarks, num_particles, 3)
         particle_to_landmark_vec = np.stack([
             self.landmarks[i, :] - self.particles[:, :3]
@@ -297,17 +287,9 @@ class ParticleFilter:
         z_axis = np.array([0, 0, 1])
         # sign: (num_landmarks, num_particles)
         sign = np.dot(cross, z_axis)
-        # heading_sign: (num_particles, 1)
-        heading_sign = np.dot(heading_normalized.T, self.forward_vec)
-        # heading_sign: (num_landmarks, num_particles)
-        heading_sign = np.tile(heading_sign.T, (self.num_landmarks, 1))
-        # sign: (num_landmarks, num_particles)
-        # sign > 0 iff predicted measurement is in port side
-        sign = np.multiply(heading_sign, sign)
 
-        #TODO: set threshold at the proper place to the proper value
         thresh = .05
-        observable = np.abs(cos) <= thresh
+        observable = np.abs(cos) <= self.sidescan_half_horizontal_beam_width
         dist[~observable] = np.inf
         dist[sign > 0] *= -1
         return dist
@@ -329,11 +311,16 @@ def main():
 
     num_particles = 500
     num_states = 6
-    process_noise = .1
-    measurement_noise = .1
+    positional_process_noise = .1
+    rotational_process_noise = .01
+    measurement_noise = .3
+    sidescan_half_horizontal_beam_width = .05  # ~3 degrees
 
-    particle_filter = ParticleFilter(num_particles, num_states, process_noise,
-                                     measurement_noise)
+    particle_filter = ParticleFilter(num_particles, num_states,
+                                     positional_process_noise,
+                                     rotational_process_noise,
+                                     measurement_noise,
+                                     sidescan_half_horizontal_beam_width)
 
     while not rospy.is_shutdown():
         rospy.spin()
