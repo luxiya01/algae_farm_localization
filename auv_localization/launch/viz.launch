@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<launch>
+    <group ns="auv_localization">
+        <node name="particle_filter_visualizer" pkg="auv_localization" type="visualizer.py">
+            <rosparam command="load" file="$(find auv_localization)/config/viz_params.yaml"/>
+        </node>
+    </group>
+</launch>

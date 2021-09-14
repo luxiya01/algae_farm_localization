@@ -1,0 +1,6 @@
+robot_name: sam
+# params for visualization
+boundary: { #the axis limit is set to the edge most landmark plus/minus xy boundary
+    x: 20,
+    y: 20,
+}
