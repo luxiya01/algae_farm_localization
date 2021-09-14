@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import rospy
 import tf2_ros
@@ -15,10 +15,10 @@ from scipy.stats import norm
 
 
 class ParticleFilter:
-    def __init__(self, num_particles, num_states, positional_process_noise,
-                 rotational_process_noise, measurement_noise,
-                 sidescan_half_horizontal_beam_width):
-        self.robot_name = self._get_robot_name()
+    def __init__(self, robot_name, num_particles, num_states,
+                 positional_process_noise, rotational_process_noise,
+                 measurement_noise, sidescan_half_horizontal_beam_width):
+        self.robot_name = robot_name
         self.num_particles = num_particles
         self.num_states = num_states
         self.positional_process_noise = positional_process_noise
@@ -112,12 +112,6 @@ class ParticleFilter:
 
     def _update_thrust(self, msg, i):
         self.thrusts[i] = msg.rpm.rpm
-
-    def _get_robot_name(self):
-        """Get robot name if exist, else use default = sam"""
-        if rospy.has_param('~robot_name'):
-            return rospy.get_param('~robot_name')
-        return 'sam'
 
     def _init_particles_msg(self):
         dim0 = MultiArrayDimension(label='particle_index',
@@ -309,14 +303,18 @@ def main():
     rospy.init_node('particle_filter', anonymous=True)
     rospy.Rate(5)
 
-    num_particles = 500
-    num_states = 6
-    positional_process_noise = .1
-    rotational_process_noise = .01
-    measurement_noise = .3
-    sidescan_half_horizontal_beam_width = .05  # ~3 degrees
+    tmp = rospy.get_param_names()
 
-    particle_filter = ParticleFilter(num_particles, num_states,
+    robot_name = rospy.get_param('~robot_name')
+    num_particles = rospy.get_param('~num_particles')
+    num_states = rospy.get_param('~num_states')
+    positional_process_noise = rospy.get_param('~positional_process_noise')
+    rotational_process_noise = rospy.get_param('~rotational_process_noise')
+    measurement_noise = rospy.get_param('~measurement_noise')
+    sidescan_half_horizontal_beam_width = rospy.get_param(
+        '~sidescan_half_horizontal_beam_width')
+
+    particle_filter = ParticleFilter(robot_name, num_particles, num_states,
                                      positional_process_noise,
                                      rotational_process_noise,
                                      measurement_noise,
