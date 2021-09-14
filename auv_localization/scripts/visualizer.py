@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import rospy
 import tf2_ros
@@ -7,6 +7,7 @@ from visualization_msgs.msg import MarkerArray
 from std_msgs.msg import Float64MultiArray
 from tf2_msgs.msg import TFMessage
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped
+from nav_msgs.msg import Odometry
 from vision_msgs.msg import Detection2DArray
 from matplotlib import animation
 from matplotlib import pyplot as plt
@@ -16,33 +17,29 @@ import numpy as np
 class Vizualizer:
     """Class for visualization of the environment, ground truth robot position
     and particle filter state estimates."""
-    def __init__(self,
-                 ax_lims={
-                     'x': None,
-                     'y': None
-                 },
-                 boundary={
-                     'x': 10,
-                     'y': 10
-                 }):
+    def __init__(self, robot_name, boundary={'x': 10, 'y': 10}):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer)
 
-        self.robot_name = self._get_robot_name()
+        self.robot_name = robot_name
         self.target_frame = 'utm'
         self.groundtruth_frame = 'gt/{}/base_link'.format(self.robot_name)
         self.boundary = boundary
         self.map_objects = self._init_map_objects()
-        self.env_lims = self._set_envlims(ax_lims)
+        self.env_lims = self._set_envlims()
 
         self.fig, self.ax = plt.subplots()
         self.environment_handles = self.init_plot()
 
         self.particles = None
         self.groundtruth_pose = None
+        self.dr_pose = None
         self.measurements = None
         self.groundtruth_line = self.init_empty_line_plot(
             label='groundtruth_pose', color='g', markersize=3)
+        self.dr_line = self.init_empty_line_plot(label='dr_pose',
+                                                 color='c',
+                                                 markersize=3)
         self.particles_line = self.init_empty_line_plot(label='particles',
                                                         color='b',
                                                         markersize=1)
@@ -50,19 +47,13 @@ class Vizualizer:
                                                           color='k',
                                                           markersize=3)
 
-    def _get_robot_name(self):
-        """Get robot name if exist, else use default = sam"""
-        if rospy.has_param('~robot_name'):
-            return rospy.get_param('~robot_name')
-        return 'sam'
-
     def _wait_for_transform(self, from_frame):
         """Wait for transform from from_frame to self.target_frame"""
         trans = None
         while trans is None:
             try:
                 trans = self.tf_buffer.lookup_transform(
-                    self.target_frame, from_frame, rospy.Time())
+                    self.target_frame, from_frame, rospy.Time(0), rospy.Duration(3.0))
             except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
                     tf2_ros.ExtrapolationException) as error:
                 print('Failed to transform. Error: {}'.format(error))
@@ -87,6 +78,10 @@ class Vizualizer:
         trans = self._wait_for_transform(from_frame=self.groundtruth_frame)
         self.groundtruth_pose = self._tf_to_pose(trans)
 
+    def update_dr_pose(self, msg):
+        trans = self._wait_for_transform(from_frame=msg.header.frame_id)
+        self.dr_pose = tf2_geometry_msgs.do_transform_pose(msg.pose, trans)
+
     def init_empty_line_plot(self, label, color, markersize):
         line, = self.ax.plot([], [],
                              label=label,
@@ -95,6 +90,14 @@ class Vizualizer:
                              ls='',
                              markersize=markersize)
         return line
+
+    def animate_dr_pose(self, i):
+        x, y = [], []
+        if self.dr_pose is not None:
+            x = self.dr_pose.pose.position.x
+            y = self.dr_pose.pose.position.y
+        self.dr_line.set_xdata(x)
+        self.dr_line.set_ydata(y)
 
     def animate_groundtruth_pose(self, i):
         """
@@ -173,20 +176,17 @@ class Vizualizer:
         print(map_objects)
         return map_objects
 
-    def _set_envlims(self, ax_lims):
-        """Set limits for all map axes. Set axis limit to that in ax_lims if
-        provided, else bound the axis so that all objects in the map can be
-        seen."""
+    def _set_envlims(self):
+        """Set limits for all map axes. Bound the axis so that all objects
+        in the map can be seen and use self.boundary to determine the size
+        of the canvas that should extend from the edge objects."""
         env_lims = {}
 
-        for axis, lim in ax_lims.items():
-            if lim is not None:
-                env_lims[axis] = lim
-            else:
-                obj_values = [obj[axis] for obj in self.map_objects.values()]
-                lim = (min(obj_values) - self.boundary[axis],
-                       max(obj_values) + self.boundary[axis])
-                env_lims[axis] = lim
+        for axis, axis_boundary in self.boundary.items():
+            obj_values = [obj[axis] for obj in self.map_objects.values()]
+            lim = (min(obj_values) - axis_boundary,
+                   max(obj_values) + axis_boundary)
+            env_lims[axis] = lim
 
         return env_lims
 
@@ -240,11 +240,13 @@ def main():
     rospy.init_node('particle_filter_localization_visualizer', anonymous=True)
     rospy.Rate(5)
 
-    viz = Vizualizer()
+    robot_name = rospy.get_param('~robot_name')
+    boundary = rospy.get_param('~boundary')
+    viz = Vizualizer(robot_name, boundary)
 
     print(viz.env_lims)
 
-    #TODO: refactor - merge init and animate functions for both groundtruth and particles
+    #TODO: refactor - merge animate functions for both groundtruth and particles
     groundtruth_pose_sub = rospy.Subscriber('/tf', TFMessage,
                                             viz.update_groundtruth_pose)
     # It's important to store the FuncAnimation to a variable
@@ -253,7 +255,13 @@ def main():
                                                   viz.animate_groundtruth_pose,
                                                   interval=50)
 
-    particles_topic = '{}/localization/particles'.format(viz.robot_name)
+    dr_odom_topic = '/{}/dr/odom'.format(viz.robot_name)
+    dr_odom_sub = rospy.Subscriber(dr_odom_topic, Odometry, viz.update_dr_pose)
+    animate_dr = animation.FuncAnimation(viz.fig,
+                                         viz.animate_dr_pose,
+                                         interval=50)
+
+    particles_topic = '/{}/localization/particles'.format(viz.robot_name)
     particles_sub = rospy.Subscriber(particles_topic, Float64MultiArray,
                                      viz.update_particles)
     animate_particles = animation.FuncAnimation(viz.fig,
