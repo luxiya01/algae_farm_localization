@@ -3,6 +3,7 @@
 import rospy
 import tf2_ros
 import tf2_geometry_msgs
+from tf.transformations import euler_from_quaternion
 from visualization_msgs.msg import MarkerArray
 from std_msgs.msg import Float64MultiArray
 from tf2_msgs.msg import TFMessage
@@ -35,17 +36,30 @@ class Vizualizer:
         self.groundtruth_pose = None
         self.dr_pose = None
         self.measurements = None
+        self.groundtruth_color = 'g'
+        self.dr_color = 'c'
+        self.particle_color = 'b'
+        self.measurement_color = 'k'
         self.groundtruth_line = self.init_empty_line_plot(
-            label='groundtruth_pose', color='g', markersize=3)
+            label='groundtruth_pose',
+            color=self.groundtruth_color,
+            markersize=3)
         self.dr_line = self.init_empty_line_plot(label='dr_pose',
-                                                 color='c',
+                                                 color=self.dr_color,
                                                  markersize=3)
-        self.particles_line = self.init_empty_line_plot(label='particles',
-                                                        color='b',
-                                                        markersize=1)
-        self.measurement_line = self.init_empty_line_plot(label='measurements',
-                                                          color='k',
-                                                          markersize=3)
+        self.particles_line = self.init_empty_line_plot(
+            label='particles', color=self.particle_color, markersize=1)
+        self.measurement_line = self.init_empty_line_plot(
+            label='measurements', color=self.measurement_color, markersize=3)
+
+        # summary stats
+        self.dr_poses = []
+        self.particle_mean = []
+        self.particle_variance = []
+        self.gt_poses = []
+        self.dt = .5
+        self.timer = rospy.Timer(rospy.Duration(self.dt),
+                                 self.update_summary_stats)
 
     def _wait_for_transform(self, from_frame):
         """Wait for transform from from_frame to self.target_frame"""
@@ -53,7 +67,8 @@ class Vizualizer:
         while trans is None:
             try:
                 trans = self.tf_buffer.lookup_transform(
-                    self.target_frame, from_frame, rospy.Time(0), rospy.Duration(3.0))
+                    self.target_frame, from_frame, rospy.Time(0),
+                    rospy.Duration(3.0))
             except (tf2_ros.LookupException, tf2_ros.ConnectivityException,
                     tf2_ros.ExtrapolationException) as error:
                 print('Failed to transform. Error: {}'.format(error))
@@ -81,6 +96,48 @@ class Vizualizer:
     def update_dr_pose(self, msg):
         trans = self._wait_for_transform(from_frame=msg.header.frame_id)
         self.dr_pose = tf2_geometry_msgs.do_transform_pose(msg.pose, trans)
+
+    def update_particles(self, msg):
+        num_particles = msg.layout.dim[0].size
+        num_states = msg.layout.dim[1].size
+        offset = msg.layout.data_offset
+
+        self.particles = np.array(msg.data[offset:]).reshape(
+            num_particles, num_states)
+
+    def update_summary_stats(self, timer):
+        if not all([(self.particles is not None), self.dr_pose,
+                    self.groundtruth_pose]):
+            return
+
+        mean = self.particles.mean(axis=0)
+        var = self.particles.var(axis=0)
+
+        self.particle_mean.append(mean)
+        self.particle_variance.append(var)
+
+        (dr_roll, dr_pitch, dr_yaw) = euler_from_quaternion([
+            self.dr_pose.pose.orientation.x, self.dr_pose.pose.orientation.y,
+            self.dr_pose.pose.orientation.z, self.dr_pose.pose.orientation.w
+        ])
+        self.dr_poses.append([
+            self.dr_pose.pose.position.x, self.dr_pose.pose.position.y,
+            self.dr_pose.pose.position.z, dr_roll, dr_pitch, dr_yaw
+        ])
+
+        (groundtruth_roll, groundtruth_pitch,
+         groundtruth_yaw) = euler_from_quaternion([
+             self.groundtruth_pose.pose.orientation.x,
+             self.groundtruth_pose.pose.orientation.y,
+             self.groundtruth_pose.pose.orientation.z,
+             self.groundtruth_pose.pose.orientation.w
+         ])
+        self.gt_poses.append([
+            self.groundtruth_pose.pose.position.x,
+            self.groundtruth_pose.pose.position.y,
+            self.groundtruth_pose.pose.position.z, groundtruth_roll,
+            groundtruth_pitch, groundtruth_yaw
+        ])
 
     def init_empty_line_plot(self, label, color, markersize):
         line, = self.ax.plot([], [],
@@ -130,14 +187,6 @@ class Vizualizer:
             y = self.measurements.pose.position.y
         self.measurement_line.set_xdata(x)
         self.measurement_line.set_ydata(y)
-
-    def update_particles(self, msg):
-        num_particles = msg.layout.dim[0].size
-        num_states = msg.layout.dim[1].size
-        offset = msg.layout.data_offset
-
-        self.particles = np.array(msg.data[offset:]).reshape(
-            num_particles, num_states)
 
     def animate_particles(self, i):
         """
@@ -235,9 +284,54 @@ class Vizualizer:
 
         return environment_handles
 
+    def plot_summary_stats(self):
+        fig, axes = plt.subplots(nrows=3,
+                                 ncols=2,
+                                 sharex=True,
+                                 figsize=(9, 12))
+        x_axis = list(range(len(self.gt_poses)))
+        titles = ['x values', 'y values', 'z values', 'roll', 'pitch', 'yaw']
+
+        for i in range(3):
+            for j in range(2):
+                axes[i][j].set_title(titles[i + j * 3])
+                axes[i][j].plot(x_axis,
+                                [pose[i + j * 3] for pose in self.gt_poses],
+                                color=self.groundtruth_color,
+                                label='groundtruth')
+                axes[i][j].plot(x_axis,
+                                [pose[i + j * 3] for pose in self.dr_poses],
+                                color=self.dr_color,
+                                label='dr_pose')
+                axes[i][j].errorbar(
+                    x_axis, [pose[i + j * 3] for pose in self.particle_mean],
+                    yerr=[pose[i + j * 3] for pose in self.particle_variance],
+                    errorevery=(0, 10),
+                    ecolor='lightgray',
+                    color=self.particle_color,
+                    label='particles')
+        plt.legend(bbox_to_anchor=(1, .5), loc='lower left', borderaxespad=0.)
+        plt.tight_layout()
+        plt.show()
+
+        for i in range(6):
+            gt_dim = np.array([pose[i] for pose in self.gt_poses])
+            dr_dim = np.array([pose[i] for pose in self.dr_poses])
+            particle_mean_dim = np.array(
+                [pose[i] for pose in self.particle_mean])
+
+            particle_diff = np.linalg.norm(particle_mean_dim - gt_dim)
+            dr_diff = np.linalg.norm(dr_dim - gt_dim)
+            print('dim{} pf error mean: {}, var: {}'.format(
+                i, particle_diff.mean(), particle_diff.var()))
+            print('dim{} dr error mean: {}, var: {}\n'.format(
+                i, dr_diff.mean(), dr_diff.var()))
+
 
 def main():
-    rospy.init_node('particle_filter_localization_visualizer', anonymous=True)
+    rospy.init_node('particle_filter_localization_visualizer',
+                    anonymous=True,
+                    disable_signals=True)
     rospy.Rate(5)
 
     robot_name = rospy.get_param('~robot_name')
@@ -279,10 +373,13 @@ def main():
     legend_handles.extend(
         [viz.groundtruth_line, viz.particles_line, viz.measurement_line])
     plt.legend(handles=legend_handles,
-               bbox_to_anchor=(1.01, 1),
-               loc='upper left',
+               bbox_to_anchor=(1, .5),
+               loc='center left',
                borderaxespad=0.)
+    plt.tight_layout()
     plt.show(block=True)
+
+    viz.plot_summary_stats()
 
 
 if __name__ == '__main__':
