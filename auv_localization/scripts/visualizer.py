@@ -12,6 +12,7 @@ from nav_msgs.msg import Odometry
 from vision_msgs.msg import Detection2DArray
 from matplotlib import animation
 from matplotlib import pyplot as plt
+from matplotlib.ticker import ScalarFormatter
 import numpy as np
 
 
@@ -30,6 +31,8 @@ class Vizualizer:
         self.env_lims = self._set_envlims()
 
         self.fig, self.ax = plt.subplots()
+        self.plot_fmt = ScalarFormatter(useOffset=True)
+        self.plot_fmt.format = '%.2f'
         self.environment_handles = self.init_plot()
 
         self.particles = None
@@ -243,6 +246,8 @@ class Vizualizer:
         """Initialize a 2D plot containing all the static map_objects."""
         self.ax.set_xlim(self.env_lims['x'])
         self.ax.set_ylim(self.env_lims['y'])
+        self.ax.xaxis.set_major_formatter(self.plot_fmt)
+        self.ax.yaxis.set_major_formatter(self.plot_fmt)
 
         environment_handles = self._static_env_plot()
 
@@ -293,6 +298,8 @@ class Vizualizer:
         titles = ['x values', 'y values', 'z values', 'roll', 'pitch', 'yaw']
 
         for i in range(3):
+            axes[i][0].yaxis.set_major_formatter(self.plot_fmt)
+            axes[i][1].set_ylim(-np.pi, np.pi)
             for j in range(2):
                 axes[i][j].set_title(titles[i + j * 3])
                 axes[i][j].plot(x_axis,
@@ -310,7 +317,11 @@ class Vizualizer:
                     ecolor='lightgray',
                     color=self.particle_color,
                     label='particles')
-        plt.legend(bbox_to_anchor=(1, .5), loc='lower left', borderaxespad=0.)
+
+        plt.legend(bbox_to_anchor=(1.01, .5),
+                   loc='lower left',
+                   prop={'size': 8},
+                   borderaxespad=0.)
         plt.tight_layout()
         plt.show()
 
@@ -320,12 +331,14 @@ class Vizualizer:
             particle_mean_dim = np.array(
                 [pose[i] for pose in self.particle_mean])
 
-            particle_diff = np.linalg.norm(particle_mean_dim - gt_dim)
-            dr_diff = np.linalg.norm(dr_dim - gt_dim)
-            print('dim{} pf error mean: {}, var: {}'.format(
-                i, particle_diff.mean(), particle_diff.var()))
-            print('dim{} dr error mean: {}, var: {}\n'.format(
-                i, dr_diff.mean(), dr_diff.var()))
+            # RMSE
+            particle_diff = np.sqrt(np.mean(particle_mean_dim - gt_dim)**2)
+            dr_diff = np.sqrt(np.mean(dr_dim - gt_dim)**2)
+
+            print('{} pf error mean: {}, var: {}'.format(
+                titles[i], particle_diff.mean(), particle_diff.var()))
+            print('{} dr error mean: {}, var: {}\n'.format(
+                titles[i], dr_diff.mean(), dr_diff.var()))
 
 
 def main():
@@ -373,8 +386,9 @@ def main():
     legend_handles.extend(
         [viz.groundtruth_line, viz.particles_line, viz.measurement_line])
     plt.legend(handles=legend_handles,
-               bbox_to_anchor=(1, .5),
+               bbox_to_anchor=(1.01, .5),
                loc='center left',
+               prop={'size': 8},
                borderaxespad=0.)
     plt.tight_layout()
     plt.show(block=True)
