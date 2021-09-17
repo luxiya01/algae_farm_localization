@@ -1,8 +1,8 @@
 robot_name: sam
 # params for particle filter
-num_particles: 500
+num_particles: 1000
 num_states: 6
-positional_process_noise: .1
-rotational_process_noise: .01
+positional_process_noise: .2
+rotational_process_noise: .03
 measurement_noise: .3
 sidescan_half_horizontal_beam_width: .05  # ~3 degrees
