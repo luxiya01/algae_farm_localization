@@ -8,7 +8,3 @@ The motion model is similar to that in
 where the sum of the two thruster RPMs are used for translational velocity. The measurement model uses range observation of the landmarks from sidescan sonar.
 
 Some experimental results are found in the [experiment folder](https://github.com/luxiya01/algae_farm_localization/tree/main/experiments).
-
-
-https://user-images.githubusercontent.com/19487700/133809714-02b026bc-37a4-414c-8099-d195d0d30c05.mp4
-
